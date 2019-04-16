@@ -2,13 +2,13 @@ package graph
 
 import (
 	//"github.com/json-iterator/go"
+	"bufio"
 	"fmt"
 	"io"
-	"sync"
 	"log"
-	"bufio"
-	"strings"
 	"strconv"
+	"strings"
+	"sync"
 	"tools"
 )
 
@@ -73,8 +73,8 @@ type Graph interface {
 	// It returns error if a node does not exist.
 	AddEdge(id1, id2 int64, weight float64) error
 
-    IsMaster(id int64) bool
-    IsMirror(id int64) bool
+	IsMaster(id int64) bool
+	IsMirror(id int64) bool
 
 	AddMirror(id int64, masterWR int)
 
@@ -84,7 +84,7 @@ type Graph interface {
 
 	GetMasters() map[int64][]int
 
-    //GetWeight returns the weight from id1 to id2.
+	//GetWeight returns the weight from id1 to id2.
 	GetWeight(id1, id2 int64) (float64, error)
 
 	// GetSources returns the map of parent Nodes.
@@ -95,7 +95,6 @@ type Graph interface {
 	// GetTargets returns the map of child Nodes.
 	// (Nodes that go out of the argument vertex.)
 	GetTargets(id int64) map[int64]float64
-
 }
 
 // graph is an internal default graph type that
@@ -131,7 +130,6 @@ func newGraph() *graph {
 		mirrorWorker:  make(map[int64]int),
 	}
 }
-
 
 func (g *graph) Init() {
 	g.idToNodes = make(map[int64]Node)
@@ -196,6 +194,7 @@ func (g *graph) AddNode(nd Node) bool {
 	return true
 }
 
+// routeMsg: all mirrors' worker id.
 func (g *graph) AddMaster(id int64, routeMsg []int) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -203,6 +202,7 @@ func (g *graph) AddMaster(id int64, routeMsg []int) {
 	g.masterWorkers[id] = routeMsg
 }
 
+// masterWR: master's worker id.
 func (g *graph) AddMirror(id int64, masterWR int) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -251,9 +251,8 @@ func (g *graph) GetWeight(id1, id2 int64) (float64, error) {
 			return v, nil
 		}
 	}
-	return 0, fmt.Errorf("there is no edge from %s to %s", id1, id2)
+	return 0, fmt.Errorf("there is no edge from %v to %v", id1, id2)
 }
-
 
 func (g *graph) GetSources(id int64) map[int64]float64 {
 	g.mu.RLock()
@@ -296,9 +295,8 @@ func (g *graph) IsMirror(id int64) bool {
 	return ok
 }
 
-
 // pattern graph should be constructed as the format
-// NodeId type numberOfSuffixNodes id1 id2 id3 ...
+// NodeId attr numberOfSuffixNodes id1 id2 id3 ...
 
 func NewPatternGraph(rd io.Reader) (Graph, error) {
 	buffer := bufio.NewReader(rd)
@@ -311,7 +309,7 @@ func NewPatternGraph(rd io.Reader) (Graph, error) {
 			break
 		}
 
-		line = line[0 : len(line) - 1]
+		line = line[0 : len(line)-1]
 		msg := strings.Split(line, " ")
 		nodeId, _ := strconv.Atoi(msg[0])
 		attr, _ := strconv.Atoi(msg[1])
@@ -319,7 +317,7 @@ func NewPatternGraph(rd io.Reader) (Graph, error) {
 		g.AddNode(node)
 
 		num, _ := strconv.Atoi(msg[2])
-		for i := 3; i < num + 3; i += 1 {
+		for i := 3; i < num+3; i += 1 {
 			v, _ := strconv.Atoi(msg[i])
 			g.AddEdge(int64(nodeId), int64(v), 1)
 		}
@@ -327,7 +325,6 @@ func NewPatternGraph(rd io.Reader) (Graph, error) {
 
 	return g, nil
 }
-
 
 func NewGraphFromTXT(G io.Reader, Master io.Reader, Mirror io.Reader, Isolated io.Reader, useTargets bool, useIsolated bool) (Graph, error) {
 	g := newGraph()
@@ -400,7 +397,7 @@ func NewGraphFromTXT(G io.Reader, Master io.Reader, Mirror io.Reader, Isolated i
 			intId := masterId
 			masterNode = NewNode(intId, int64(intId%tools.GraphSimulationTypeModel))
 			if ok := g.AddNode(masterNode); !ok {
-				return nil, fmt.Errorf("%s already exists", intId)
+				return nil, fmt.Errorf("%v already exists", intId)
 			}
 		}
 
