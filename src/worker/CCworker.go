@@ -306,6 +306,11 @@ func (w *CCWorker) ExchangeMessage(ctx context.Context, args *pb.ExchangeRequest
 	return &pb.ExchangeResponse{Ok:true}, nil
 }
 
+func (w *CCWorker) BFSSend(ctx context.Context, args *pb.BFSMessageRequest) (
+	*pb.BFSMessageResponse, error) {
+	return nil, nil
+}
+
 func (w *CCWorker) SSSPSend(ctx context.Context, args *pb.SSSPMessageRequest) (*pb.SSSPMessageResponse, error) {
 	return nil, nil
 }

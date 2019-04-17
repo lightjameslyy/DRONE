@@ -326,6 +326,11 @@ func (w *SimWorker) Assemble(ctx context.Context, args *pb.AssembleRequest) (*pb
 	return &pb.AssembleResponse{Ok: true}, nil
 }
 
+func (w *SimWorker) BFSSend(ctx context.Context, args *pb.BFSMessageRequest) (
+	*pb.BFSMessageResponse, error) {
+	return nil, nil
+}
+
 func (w *SimWorker) SSSPSend(ctx context.Context, args *pb.SSSPMessageRequest) (*pb.SSSPMessageResponse, error) {
 	return nil, nil
 }

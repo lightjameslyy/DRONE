@@ -9,40 +9,48 @@ import (
 	"graph"
 	"io"
 	"log"
-	"math"
 	"net"
 	"os"
 	pb "protobuf"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 	"tools"
-	"sort"
 )
 
-func Generate(g graph.Graph) map[int64]float64 {
-	distance := make(map[int64]float64)
+func GenerateLevel(g graph.Graph) map[int64]int64 {
+	level := make(map[int64]int64)
 
 	for id := range g.GetNodes() {
-		distance[id] = math.MaxFloat64
+		level[id] = 1<<63 - 1
 	}
-	return distance
+	return level
+}
+
+func GenerateParent(g graph.Graph) map[int64]int64 {
+	parent := make(map[int64]int64)
+
+	for id := range g.GetNodes() {
+		parent[id] = -1
+	}
+	return parent
 }
 
 // rpc send has max size limit, so we spilt our transfer into many small block
-func Peer2PeerSSSPSend(client pb.WorkerClient, message []*pb.SSSPMessageStruct, id int, calculateStep bool)  {
+func Peer2PeerBFSSend(client pb.WorkerClient, message []*pb.BFSMessageStruct, id int, calculateStep bool) {
 	for len(message) > tools.RPCSendSize {
 		slice := message[0:tools.RPCSendSize]
 		message = message[tools.RPCSendSize:]
-		_, err := client.SSSPSend(context.Background(), &pb.SSSPMessageRequest{Pair: slice, CalculateStep:calculateStep})
+		_, err := client.BFSSend(context.Background(), &pb.BFSMessageRequest{Pair: slice, CalculateStep: calculateStep})
 		if err != nil {
 			log.Printf("send to %v error\n", id)
 			log.Fatal(err)
 		}
 	}
 	if len(message) != 0 {
-		_, err := client.SSSPSend(context.Background(), &pb.SSSPMessageRequest{Pair: message, CalculateStep:calculateStep})
+		_, err := client.BFSSend(context.Background(), &pb.BFSMessageRequest{Pair: message, CalculateStep: calculateStep})
 		if err != nil {
 			log.Printf("send to %v error\n", id)
 			log.Fatal(err)
@@ -50,39 +58,40 @@ func Peer2PeerSSSPSend(client pb.WorkerClient, message []*pb.SSSPMessageStruct, 
 	}
 }
 
-type SSSPWorker struct {
+type BFSWorker struct {
 	mutex *sync.Mutex
 
 	peers        []string
 	selfId       int // the id of this worker itself in workers
 	grpcHandlers map[int]*grpc.ClientConn
-	workerNum int
+	workerNum    int
 
-	g           graph.Graph
-	distance    map[int64]float64 //
+	g      graph.Graph
+	parent map[int64]int64
+	level  map[int64]int64 //
 	//exchangeMsg map[graph.ID]float64
-	updatedBuffer     []*algorithm.Pair
-	exchangeBuffer    []*algorithm.Pair
-	updatedMaster     map[int64]bool
-	updatedMirror     map[int64]bool
-	updatedByMessage  map[int64]bool
+	updatedBuffer    []*algorithm.BFSPair
+	exchangeBuffer   []*algorithm.BFSPair
+	updatedMaster    map[int64]bool
+	updatedMirror    map[int64]bool
+	updatedByMessage map[int64]bool
 
 	iterationNum int
 	stopChannel  chan bool
 
-	calTime float64
+	calTime  float64
 	sendTime float64
 }
 
-func (w *SSSPWorker) Lock() {
+func (w *BFSWorker) Lock() {
 	w.mutex.Lock()
 }
 
-func (w *SSSPWorker) UnLock() {
+func (w *BFSWorker) UnLock() {
 	w.mutex.Unlock()
 }
 
-func (w *SSSPWorker) ShutDown(ctx context.Context, args *pb.ShutDownRequest) (*pb.ShutDownResponse, error) {
+func (w *BFSWorker) ShutDown(ctx context.Context, args *pb.ShutDownRequest) (*pb.ShutDownResponse, error) {
 	log.Println("receive shutDown request")
 	log.Printf("worker %v calTime:%v sendTime:%v", w.selfId, w.calTime, w.sendTime)
 	w.Lock()
@@ -100,7 +109,7 @@ func (w *SSSPWorker) ShutDown(ctx context.Context, args *pb.ShutDownRequest) (*p
 	return &pb.ShutDownResponse{IterationNum: int32(w.iterationNum)}, nil
 }
 
-func (w *SSSPWorker) SSSPMessageSend(messages map[int][]*algorithm.Pair, calculateStep bool) []*pb.WorkerCommunicationSize {
+func (w *BFSWorker) BFSMessageSend(messages map[int][]*algorithm.BFSPair, calculateStep bool) []*pb.WorkerCommunicationSize {
 	SlicePeerSend := make([]*pb.WorkerCommunicationSize, 0)
 	var wg sync.WaitGroup
 	messageLen := len(messages)
@@ -121,15 +130,15 @@ func (w *SSSPWorker) SSSPMessageSend(messages map[int][]*algorithm.Pair, calcula
 	indexBuffer = append(indexBuffer[start:], indexBuffer[:start]...)
 
 	for i := 1; i <= batch; i++ {
-		for j := (i - 1) * tools.ConnPoolSize; j < i * tools.ConnPoolSize && j < len(indexBuffer); j++ {
+		for j := (i - 1) * tools.ConnPoolSize; j < i*tools.ConnPoolSize && j < len(indexBuffer); j++ {
 			partitionId := indexBuffer[j]
 			message := messages[partitionId]
 			wg.Add(1)
 
-			eachWorkerCommunicationSize := &pb.WorkerCommunicationSize{WorkerID:int32(partitionId + 1), CommunicationSize:int32(len(message))}
+			eachWorkerCommunicationSize := &pb.WorkerCommunicationSize{WorkerID: int32(partitionId + 1), CommunicationSize: int32(len(message))}
 			SlicePeerSend = append(SlicePeerSend, eachWorkerCommunicationSize)
 
-			go func(partitionId int, message []*algorithm.Pair) {
+			go func(partitionId int, message []*algorithm.BFSPair) {
 				defer wg.Done()
 				workerHandle, err := grpc.Dial(w.peers[partitionId+1], grpc.WithInsecure())
 				if err != nil {
@@ -138,11 +147,14 @@ func (w *SSSPWorker) SSSPMessageSend(messages map[int][]*algorithm.Pair, calcula
 				defer workerHandle.Close()
 
 				client := pb.NewWorkerClient(workerHandle)
-				encodeMessage := make([]*pb.SSSPMessageStruct, 0)
+				encodeMessage := make([]*pb.BFSMessageStruct, 0)
 				for _, msg := range message {
-					encodeMessage = append(encodeMessage, &pb.SSSPMessageStruct{NodeID: msg.NodeId, Distance:msg.Distance})
+					encodeMessage = append(encodeMessage,
+						&pb.BFSMessageStruct{NodeID: msg.NodeId,
+							ParentId: msg.ParentId,
+							Level:    msg.Level})
 				}
-				Peer2PeerSSSPSend(client, encodeMessage, partitionId + 1, calculateStep)
+				Peer2PeerBFSSend(client, encodeMessage, partitionId+1, calculateStep)
 			}(partitionId, message)
 
 		}
@@ -151,7 +163,7 @@ func (w *SSSPWorker) SSSPMessageSend(messages map[int][]*algorithm.Pair, calcula
 	return SlicePeerSend
 }
 
-func (w *SSSPWorker) peval(args *pb.PEvalRequest, id int) {
+func (w *BFSWorker) peval(args *pb.PEvalRequest, id int) {
 	var fullSendStart time.Time
 	var fullSendDuration float64
 	var SlicePeerSend []*pb.WorkerCommunicationSize
@@ -159,7 +171,9 @@ func (w *SSSPWorker) peval(args *pb.PEvalRequest, id int) {
 
 	startId := int64(73723936)
 
-	isMessageToSend, messages, _, combineTime, iterationNum, updatePairNum, dstPartitionNum := algorithm.SSSP_PEVal(w.g, w.distance, startId, w.updatedMaster, w.updatedMirror)
+	isMessageToSend, messages, _, combineTime, iterationNum, updatePairNum,
+	dstPartitionNum := algorithm.BFS_PEVal(w.g, w.parent, w.level, startId,
+		w.updatedMaster, w.updatedMirror)
 
 	//log.Printf("zs-log:worker%v visited:%v, percent:%v%%\n", id, w.visited.Size(), float64(w.visited.Size()) / float64(len(w.g.GetNodes())))
 	calculateTime := time.Since(calculateStart).Seconds()
@@ -179,7 +193,7 @@ func (w *SSSPWorker) peval(args *pb.PEvalRequest, id int) {
 		return
 	} else {
 		fullSendStart = time.Now()
-		SlicePeerSend = w.SSSPMessageSend(messages, true)
+		SlicePeerSend = w.BFSMessageSend(messages, true)
 	}
 
 	fullSendDuration = time.Since(fullSendStart).Seconds()
@@ -196,21 +210,22 @@ func (w *SSSPWorker) peval(args *pb.PEvalRequest, id int) {
 	Client.SuperStepFinish(context.Background(), finishRequest)
 }
 
-func (w *SSSPWorker) PEval(ctx context.Context, args *pb.PEvalRequest) (*pb.PEvalResponse, error) {
+func (w *BFSWorker) PEval(ctx context.Context, args *pb.PEvalRequest) (*pb.PEvalResponse, error) {
 	go w.peval(args, w.selfId)
-	return &pb.PEvalResponse{Ok:true}, nil
+	return &pb.PEvalResponse{Ok: true}, nil
 }
 
-func (w *SSSPWorker) incEval(args *pb.IncEvalRequest, id int) {
+func (w *BFSWorker) incEval(args *pb.IncEvalRequest, id int) {
 	calculateStart := time.Now()
 	w.iterationNum++
 
 	isMessageToSend, messages, _, combineTime, iterationNum, updatePairNum, dstPartitionNum, aggregateTime,
-	aggregatorOriSize, aggregatorReducedSize := algorithm.SSSP_IncEval(w.g, w.distance, w.exchangeBuffer, w.updatedMaster, w.updatedMirror, w.updatedByMessage, id)
+	aggregatorOriSize, aggregatorReducedSize := algorithm.BFS_IncEval(w.g, w.parent,
+		w.level, w.exchangeBuffer, w.updatedMaster, w.updatedMirror, w.updatedByMessage, id)
 
 	//log.Printf("zs-log: worker:%v visited:%v, percent:%v%%\n", id, w.visited.Size(), float64(w.visited.Size()) / float64(len(w.g.GetNodes())))
 
-	w.exchangeBuffer = make([]*algorithm.Pair, 0)
+	w.exchangeBuffer = make([]*algorithm.BFSPair, 0)
 	w.updatedMirror = make(map[int64]bool)
 	w.updatedByMessage = make(map[int64]bool)
 
@@ -235,7 +250,7 @@ func (w *SSSPWorker) incEval(args *pb.IncEvalRequest, id int) {
 		return
 	} else {
 		fullSendStart = time.Now()
-		SlicePeerSend = w.SSSPMessageSend(messages, true)
+		SlicePeerSend = w.BFSMessageSend(messages, true)
 	}
 	fullSendDuration = time.Since(fullSendStart).Seconds()
 
@@ -251,24 +266,29 @@ func (w *SSSPWorker) incEval(args *pb.IncEvalRequest, id int) {
 	Client.SuperStepFinish(context.Background(), finishRequest)
 }
 
-func (w *SSSPWorker) IncEval(ctx context.Context, args *pb.IncEvalRequest) (*pb.IncEvalResponse, error) {
+func (w *BFSWorker) IncEval(ctx context.Context, args *pb.IncEvalRequest) (*pb.IncEvalResponse, error) {
 	go w.incEval(args, w.selfId)
-	return &pb.IncEvalResponse{Update:true}, nil
+	return &pb.IncEvalResponse{Update: true}, nil
 }
 
-func (w *SSSPWorker) Assemble(ctx context.Context, args *pb.AssembleRequest) (*pb.AssembleResponse, error) {
+func (w *BFSWorker) Assemble(ctx context.Context, args *pb.AssembleRequest) (*pb.AssembleResponse, error) {
 	var f *os.File
 	if tools.WorkerOnSC {
-		f, _ = os.Create(tools.ResultPath + "ssspresult_" + strconv.Itoa(w.selfId-1))
+		f, _ = os.Create(tools.ResultPath + "bfsresult_" + strconv.Itoa(w.
+			selfId - 1))
 	} else {
 		f, _ = os.Create(tools.ResultPath + "/result_" + strconv.Itoa(w.selfId-1))
 	}
 	writer := bufio.NewWriter(f)
 	defer f.Close()
 
-	for id, dist := range w.distance {
-		if !w.g.IsMirror(id) && dist != math.MaxFloat64 {
-			writer.WriteString(strconv.FormatInt(id,10) + "\t" + strconv.FormatFloat(dist, 'E', -1, 64) + "\n")
+	writer.WriteString("NodeId\tParentId\tLevel\n")
+	for id, lev := range w.level {
+		if !w.g.IsMirror(id) && lev != 1<<63 -1 {
+			writer.WriteString(
+				strconv.FormatInt(id, 10) + "\t" +
+					strconv.FormatInt(w.parent[id], 10) + "\t" +
+					strconv.FormatInt(lev, 10) + "\n")
 		}
 	}
 	writer.Flush()
@@ -276,58 +296,58 @@ func (w *SSSPWorker) Assemble(ctx context.Context, args *pb.AssembleRequest) (*p
 	return &pb.AssembleResponse{Ok: true}, nil
 }
 
-func (w *SSSPWorker) ExchangeMessage(ctx context.Context, args *pb.ExchangeRequest) (*pb.ExchangeResponse, error) {
+func (w *BFSWorker) ExchangeMessage(ctx context.Context, args *pb.ExchangeRequest) (*pb.ExchangeResponse, error) {
 	calculateStart := time.Now()
 	for _, pair := range w.updatedBuffer {
 		id := pair.NodeId
-		dis := pair.Distance
+		parentId := pair.ParentId
+		lev := pair.Level
 
-		if dis == w.distance[id] {
+		if lev == w.level[id] {
 			continue
 		}
 
-		if dis < w.distance[id] {
-			w.distance[id] = dis
+		if lev < w.level[id] {
+			w.level[id] = lev
+			w.parent[id] = parentId
 			w.updatedByMessage[id] = true
 		}
 		w.updatedMaster[id] = true
 	}
-	w.updatedBuffer = make([]*algorithm.Pair, 0)
+	w.updatedBuffer = make([]*algorithm.BFSPair, 0)
 
 	master := w.g.GetMasters()
-	messageMap := make(map[int][]*algorithm.Pair)
+	messageMap := make(map[int][]*algorithm.BFSPair)
 	for id := range w.updatedMaster {
 		for _, partition := range master[id] {
 			if _, ok := messageMap[partition]; !ok {
-				messageMap[partition] = make([]*algorithm.Pair, 0)
+				messageMap[partition] = make([]*algorithm.BFSPair, 0)
 			}
-			messageMap[partition] = append(messageMap[partition], &algorithm.Pair{NodeId: id, Distance: w.distance[id]})
+			messageMap[partition] = append(messageMap[partition],
+				&algorithm.BFSPair{NodeId: id, ParentId: w.parent[id], Level: w.
+					level[id]})
 		}
 	}
 
 	calculateTime := time.Since(calculateStart).Seconds()
 	messageStart := time.Now()
 
-	w.SSSPMessageSend(messageMap, false)
+	w.BFSMessageSend(messageMap, false)
 	messageTime := time.Since(messageStart).Seconds()
 
 	w.updatedMaster = make(map[int64]bool)
 
 	w.calTime += calculateTime
 	w.sendTime += messageTime
-	return &pb.ExchangeResponse{Ok:true}, nil
+	return &pb.ExchangeResponse{Ok: true}, nil
 }
 
-func (w *SSSPWorker) BFSSend(ctx context.Context,
-	args *pb.BFSMessageRequest) (*pb.BFSMessageResponse, error) {
-	return nil, nil
-}
-
-func (w *SSSPWorker) SSSPSend(ctx context.Context, args *pb.SSSPMessageRequest) (*pb.SSSPMessageResponse, error) {
-	decodeMessage := make([]*algorithm.Pair, 0)
+func (w *BFSWorker) BFSSend(ctx context.Context, args *pb.BFSMessageRequest) (*pb.BFSMessageResponse, error) {
+	decodeMessage := make([]*algorithm.BFSPair, 0)
 
 	for _, msg := range args.Pair {
-		decodeMessage = append(decodeMessage, &algorithm.Pair{NodeId: msg.NodeID, Distance: msg.Distance})
+		decodeMessage = append(decodeMessage, &algorithm.BFSPair{NodeId: msg.
+			NodeID, ParentId: msg.ParentId, Level: msg.Level})
 	}
 	w.Lock()
 	if args.CalculateStep {
@@ -337,23 +357,28 @@ func (w *SSSPWorker) SSSPSend(ctx context.Context, args *pb.SSSPMessageRequest) 
 	}
 	w.UnLock()
 
-	return &pb.SSSPMessageResponse{}, nil
+	return &pb.BFSMessageResponse{}, nil
 }
 
-func (w *SSSPWorker) SimSend(ctx context.Context, args *pb.SimMessageRequest) (*pb.SimMessageResponse, error) {
-	return nil, nil
-}
-func (w *SSSPWorker) PRSend(ctx context.Context, args *pb.PRMessageRequest) (*pb.PRMessageResponse, error) {
+func (w *BFSWorker) SSSPSend(ctx context.Context, args *pb.SSSPMessageRequest) (
+	*pb.SSSPMessageResponse, error) {
 	return nil, nil
 }
 
-func newWorker(id, partitionNum int) *SSSPWorker {
-	w := new(SSSPWorker)
+func (w *BFSWorker) SimSend(ctx context.Context, args *pb.SimMessageRequest) (*pb.SimMessageResponse, error) {
+	return nil, nil
+}
+func (w *BFSWorker) PRSend(ctx context.Context, args *pb.PRMessageRequest) (*pb.PRMessageResponse, error) {
+	return nil, nil
+}
+
+func newBFSWorker(id, partitionNum int) *BFSWorker {
+	w := new(BFSWorker)
 	w.mutex = new(sync.Mutex)
 	w.selfId = id
 	w.peers = make([]string, 0)
-	w.updatedBuffer = make([]*algorithm.Pair, 0)
-	w.exchangeBuffer = make([]*algorithm.Pair, 0)
+	w.updatedBuffer = make([]*algorithm.BFSPair, 0)
+	w.exchangeBuffer = make([]*algorithm.BFSPair, 0)
 	w.updatedMaster = make(map[int64]bool)
 	w.updatedMirror = make(map[int64]bool)
 	w.updatedByMessage = make(map[int64]bool)
@@ -425,13 +450,14 @@ func newWorker(id, partitionNum int) *SSSPWorker {
 	if w.g == nil {
 		log.Println("can't load graph")
 	}
-	w.distance = Generate(w.g)
+	w.level = GenerateLevel(w.g)
+	w.parent = GenerateParent(w.g)
 
 	return w
 }
 
-func RunWorker(id, partitionNum int) {
-	w := newWorker(id, partitionNum)
+func RunBFSWorker(id, partitionNum int) {
+	w := newBFSWorker(id, partitionNum)
 
 	log.Println(w.selfId)
 	log.Println(w.peers[w.selfId])
