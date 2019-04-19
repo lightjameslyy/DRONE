@@ -169,11 +169,16 @@ func (w *BFSWorker) peval(args *pb.PEvalRequest, id int) {
 	var SlicePeerSend []*pb.WorkerCommunicationSize
 	calculateStart := time.Now()
 
-	startId := int64(73723936)
+	startId := int64(1)
 
 	isMessageToSend, messages, _, combineTime, iterationNum, updatePairNum,
-	dstPartitionNum := algorithm.BFS_PEVal(w.g, w.parent, w.level, startId,
+		dstPartitionNum := algorithm.BFS_PEVal(w.g, w.parent, w.level, startId,
 		w.updatedMaster, w.updatedMirror)
+
+	//log.Printf("lt in peval worker %v: parent: %v\n", w.selfId, w.parent)
+	//log.Printf("lt in peval worker %v: level: %v\n", w.selfId, w.level)
+	//log.Printf("lt in peval worker %v: updatedMaster: %v\n", w.selfId, w.updatedMaster)
+	//log.Printf("lt in peval worker %v: updatedMirror: %v\n", w.selfId, w.updatedMirror)
 
 	//log.Printf("zs-log:worker%v visited:%v, percent:%v%%\n", id, w.visited.Size(), float64(w.visited.Size()) / float64(len(w.g.GetNodes())))
 	calculateTime := time.Since(calculateStart).Seconds()
@@ -220,7 +225,7 @@ func (w *BFSWorker) incEval(args *pb.IncEvalRequest, id int) {
 	w.iterationNum++
 
 	isMessageToSend, messages, _, combineTime, iterationNum, updatePairNum, dstPartitionNum, aggregateTime,
-	aggregatorOriSize, aggregatorReducedSize := algorithm.BFS_IncEval(w.g, w.parent,
+		aggregatorOriSize, aggregatorReducedSize := algorithm.BFS_IncEval(w.g, w.parent,
 		w.level, w.exchangeBuffer, w.updatedMaster, w.updatedMirror, w.updatedByMessage, id)
 
 	//log.Printf("zs-log: worker:%v visited:%v, percent:%v%%\n", id, w.visited.Size(), float64(w.visited.Size()) / float64(len(w.g.GetNodes())))
@@ -275,7 +280,7 @@ func (w *BFSWorker) Assemble(ctx context.Context, args *pb.AssembleRequest) (*pb
 	var f *os.File
 	if tools.WorkerOnSC {
 		f, _ = os.Create(tools.ResultPath + "bfsresult_" + strconv.Itoa(w.
-			selfId - 1))
+			selfId-1))
 	} else {
 		f, _ = os.Create(tools.ResultPath + "/result_" + strconv.Itoa(w.selfId-1))
 	}
@@ -284,7 +289,7 @@ func (w *BFSWorker) Assemble(ctx context.Context, args *pb.AssembleRequest) (*pb
 
 	writer.WriteString("NodeId\tParentId\tLevel\n")
 	for id, lev := range w.level {
-		if !w.g.IsMirror(id) && lev != 1<<63 -1 {
+		if !w.g.IsMirror(id) && lev != 1<<63-1 {
 			writer.WriteString(
 				strconv.FormatInt(id, 10) + "\t" +
 					strconv.FormatInt(w.parent[id], 10) + "\t" +
@@ -418,7 +423,7 @@ func newBFSWorker(id, partitionNum int) *BFSWorker {
 	if tools.WorkerOnSC {
 		graphIO, _ = os.Open(tools.NFSPath + strconv.Itoa(partitionNum) + "/G." + strconv.Itoa(w.selfId-1))
 	} else {
-		graphIO, _ = os.Open(tools.NFSPath + "G." + strconv.Itoa(w.selfId-1))
+		graphIO, _ = os.Open(tools.NFSPath + "/G." + strconv.Itoa(w.selfId-1))
 	}
 	defer graphIO.Close()
 
@@ -430,9 +435,9 @@ func newBFSWorker(id, partitionNum int) *BFSWorker {
 		mirror, _ = os.Open(tools.NFSPath + strconv.Itoa(partitionNum) + "/Mirror." + strconv.Itoa(w.selfId-1))
 		isolated, _ = os.Open(tools.NFSPath + strconv.Itoa(partitionNum) + "/Isolateds." + strconv.Itoa(w.selfId-1))
 	} else {
-		master, _ = os.Open(tools.NFSPath + "Master." + strconv.Itoa(w.selfId-1))
-		mirror, _ = os.Open(tools.NFSPath + "Mirror." + strconv.Itoa(w.selfId-1))
-		isolated, _ = os.Open(tools.NFSPath + "Isolateds." + strconv.Itoa(w.selfId-1))
+		master, _ = os.Open(tools.NFSPath + "/Master." + strconv.Itoa(w.selfId-1))
+		mirror, _ = os.Open(tools.NFSPath + "/Mirror." + strconv.Itoa(w.selfId-1))
+		isolated, _ = os.Open(tools.NFSPath + "/Isolateds." + strconv.Itoa(w.selfId-1))
 	}
 	defer master.Close()
 	defer mirror.Close()
@@ -446,6 +451,11 @@ func newBFSWorker(id, partitionNum int) *BFSWorker {
 	loadTime := time.Since(start)
 	fmt.Printf("loadGraph Time: %v", loadTime)
 	log.Printf("graph size:%v\n", len(w.g.GetNodes()))
+
+	//log.Printf("lt partition %v: nodes: %v\n", id, w.g.GetNodes())
+	//log.Printf("lt partition %v: node count: %v\n", id, w.g.GetNodeCount())
+	//log.Printf("lt partition %v: masters: %v\n", id, w.g.GetMasters())
+	//log.Printf("lt partition %v: mirrors: %v\n", id, w.g.GetMirrors())
 
 	if w.g == nil {
 		log.Println("can't load graph")

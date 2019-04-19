@@ -92,9 +92,9 @@ func BFS_PEVal(g graph.Graph, parent map[int64]int64, level map[int64]int64, sta
 		// pId := node.ParentId
 		curLevel := node.Level
 
-		if curLevel >= level[curId] {
-			continue
-		}
+		//if curLevel >= level[curId] {
+		//	continue
+		//}
 
 		for childId, _ := range g.GetTargets(curId) {
 			// unvisited or not optimal
@@ -191,9 +191,9 @@ func BFS_IncEval(g graph.Graph, parent map[int64]int64, level map[int64]int64,
 		// pId := node.ParentId
 		curLevel := node.Level
 
-		if curLevel >= level[curId] {
-			continue
-		}
+		//if curLevel >= level[curId] {
+		//	continue
+		//}
 
 		for childId, _ := range g.GetTargets(curId) {
 			// unvisited or not optimal
